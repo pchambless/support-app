@@ -1,0 +1,15 @@
+{
+  "name": "support-app",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "First real consumer of the app-engine library - serves support.whatsfresh.app",
+  "main": "server.js",
+  "scripts": {
+    "start": "node --env-file=.env server.js"
+  },
+  "dependencies": {
+    "app-engine": "github:pchambless/app-engine#main",
+    "express": "^4.19.2"
+  }
+}
