@@ -1,5 +1,6 @@
 import express from 'express';
-import { resolveLayout, buildHtmxDiv, callWorkflow } from 'app-engine';
+import Handlebars from 'handlebars';
+import { resolveLayout, buildHtmxDiv, wrapHtml, callWorkflow } from 'app-engine';
 
 // No login/session flow - support has no login screen (JSON allowlist is
 // authorization, not authentication; for a single trusted user, network-level
@@ -7,31 +8,22 @@ import { resolveLayout, buildHtmxDiv, callWorkflow } from 'app-engine';
 const config = {
   schema: 'support',
   layoutTemplateName: 'wf_layout',
-  navCssClass: 'appbar-nav'
+  navCssClass: 'appbar-nav',
+  loginPath: '/agile-board'
 };
-
-const SHELL_CSS_CLASSES = ['themes', 'base', 'layout', 'header', 'content', 'dropdown-container', 'grid-form-layout', 'grid-picker', 'page-grid'];
 
 const app = express();
 app.use(express.json());
 
 app.get('/health', (req, res) => res.send('ok'));
 
-// TODO not wired yet: real row-data hydration needs a schema-aware hydrate-guide
-// (currently hardcoded to studio.tf_template_router) or a direct app_engine query
-// path. Stubbed so htmx's load-trigger POST gets a clean response instead of a 404.
-app.post('/api/hydrate', (req, res) => {
-  res.type('html').send('<div class="hydrate-pending" style="padding:12px;color:#888;">Live data hydration not wired up yet.</div>');
-});
-
 app.get('/', (req, res) => res.redirect('/agile-board'));
 
 app.get('/agile-board', async (req, res) => {
   try {
     const pageRows = await callWorkflow('server-query', {
-      query: `SELECT p.id AS page_id, pt.html AS shell_html, pc.comp_name, pc.slot_name, pc.actions, ht.name AS template_name
+      query: `SELECT p.id AS page_id, pc.comp_name, pc.slot_name, pc.actions, ht.name AS template_name
               FROM support.pages p
-              JOIN support.html_templates pt ON pt.id = p.template_id
               JOIN support.page_components pc ON pc.page_id = p.id
               JOIN support.html_templates ht ON ht.id = pc.html_template_id
               WHERE p.page_name = 'agile-board'`,
@@ -43,22 +35,13 @@ app.get('/agile-board', async (req, res) => {
       return res.status(404).send('agile-board page has no components');
     }
 
-    const cssResults = await Promise.all(
-      SHELL_CSS_CLASSES.map(cls =>
-        callWorkflow('server-query', {
-          query: `SELECT app_engine.f_css('support', '${cls}') as css`,
-          params: {},
-          source: 'server'
-        })
-      )
-    );
-    const shellCss = cssResults
-      .map(r => (Array.isArray(r) && r[0]?.css) ? r[0].css : '')
-      .filter(Boolean)
-      .join('\n');
+    const shellStyledHtml = await callWorkflow('server-query', {
+      query: `SELECT app_engine.f_html_styled('support', 'grid-form-page') as html`,
+      params: {},
+      source: 'server'
+    });
+    let pageHtml = Array.isArray(shellStyledHtml) ? shellStyledHtml[0]?.html : '';
 
-    // Inner content shell (grid-form-page): fill its {{slot:grid}} etc first.
-    let pageHtml = pageRows[0].shell_html;
     for (const row of pageRows) {
       if (row.slot_name !== 'grid') continue;
       const div = buildHtmxDiv({
@@ -75,14 +58,63 @@ app.get('/agile-board', async (req, res) => {
       .replace(/\{\{slot:dropdown-\d\}\}/g, '')
       .replace('{{slot:context-btn}}', '');
 
-    // Outer layout (wf_layout): resolveLayout injects nav into {{slot:appbar}}.
     let layoutHtml = await resolveLayout([], config);
     layoutHtml = layoutHtml.replace('{{slot:page}}', pageHtml);
 
-    res.type('html').send(`<style>\n${shellCss}\n</style>\n${layoutHtml}`);
+    const pageMetaScript = `<script>window.__pageContext = { pageId: ${pageRows[0].page_id}, contextKey: "agile_id", form: "agile_form", hideCrud: true };</script>`;
+    res.send(wrapHtml('Agile Board', pageMetaScript + layoutHtml, config));
   } catch (err) {
     console.error('[agile-board] render failed', err);
     res.status(500).send(`Render failed: ${err.message}`);
+  }
+});
+
+// Real hydration: fetch the template's own hydrate SQL, run it with whatever
+// context params htmx sent, compile the (possibly css-wrapped) handlebars
+// markup against the rows. No hydrate-guide involved - that workflow is still
+// hardcoded to studio.tf_template_router, not schema-aware, so this goes
+// straight at app_engine/support instead of routing through it.
+app.post('/api/hydrate', async (req, res) => {
+  const { template_name, page_id, page_title, ...contextParams } = req.body || {};
+  if (!template_name) return res.status(400).type('text').send('template_name required');
+
+  try {
+    const tmplResult = await callWorkflow('server-query', {
+      query: `SELECT hydrate FROM support.html_templates WHERE name = :template_name`,
+      params: { template_name },
+      source: 'server'
+    });
+    const hydrateSql = Array.isArray(tmplResult) ? tmplResult[0]?.hydrate : null;
+
+    const styledResult = await callWorkflow('server-query', {
+      query: `SELECT app_engine.f_html_styled('support', :template_name) as html`,
+      params: { template_name },
+      source: 'server'
+    });
+    const styledHtml = Array.isArray(styledResult) ? styledResult[0]?.html : null;
+
+    if (!styledHtml) {
+      return res.type('html').send(`<div class="hydrate-pending" style="padding:12px;color:#888;">No template named ${template_name}.</div>`);
+    }
+
+    if (!hydrateSql) {
+      // Static template, no data to pull - just render it as-is.
+      return res.type('html').send(Handlebars.compile(styledHtml)({}));
+    }
+
+    const hydrateParams = { id: 58, status: 'All', ...contextParams };
+    const rows = await callWorkflow('server-query', {
+      query: hydrateSql,
+      params: hydrateParams,
+      source: 'server'
+    });
+    const dataArr = Array.isArray(rows) ? rows : [];
+
+    const html = Handlebars.compile(styledHtml)({ data: dataArr });
+    res.type('html').send(html);
+  } catch (err) {
+    console.error('[hydrate] failed', err);
+    res.status(500).type('text').send('Hydration failed: ' + err.message);
   }
 });
 

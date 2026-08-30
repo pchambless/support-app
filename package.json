@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "app-engine": "github:pchambless/app-engine#main",
-    "express": "^4.19.2"
+    "express": "^4.19.2",
+    "handlebars": "^4.7.9"
   }
 }
