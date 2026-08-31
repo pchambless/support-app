@@ -63,10 +63,8 @@ app.get('/agile-board', async (req, res) => {
     let layoutHtml = await resolveLayout([], config);
     layoutHtml = layoutHtml.replace('{{slot:page}}', pageHtml);
 
-    // hideCrud stays true regardless of template_type === 'crud': /api/dml
-    // doesn't exist yet (no write path built), so an Add New button would
-    // just 404. Once dml is wired up, this should read from config instead
-    // of overriding it.
+    // hideCrud stays hardcoded true for now: /api/dml doesn't exist yet (no
+    // write path built), so an Add New button would just 404.
     const { page_id, context_key, form_template, page_title } = pageRows[0];
     const pageMetaScript = `<script>window.__pageContext = { pageId: ${page_id}, contextKey: ${JSON.stringify(context_key || 'id')}, form: ${JSON.stringify(form_template || '')}, hideCrud: true };</script>`;
     res.send(wrapHtml(page_title || 'Support', pageMetaScript + layoutHtml, config));
