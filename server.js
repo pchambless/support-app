@@ -194,11 +194,13 @@ app.post('/api/hydrate', async (req, res) => {
 
 // Real write path: app-engine-actions (new, generic n8n workflow wrapping
 // app_engine.dml()) - part of the app-engine workflow set, not a whatsfresh
-// workflow. Field "id" doubles as the form's pk carrier (formActions.js
-// submits it as a plain field) and app_engine.dml()'s separate pk_val arg -
-// split it out here rather than passing it through as a data column.
+// workflow. Field is named record_id, not id - a form field literally named
+// "id" collides with HTMLFormElement's own named-control shadowing of
+// form.id, which broke formActions.js's form.id === "inline_form_element"
+// check (real bug, found live: it silently let the browser's native GET
+// submission through instead of calling /api/dml at all).
 app.post('/api/dml', async (req, res) => {
-  const { page_id, mode, id, ...fields } = req.body || {};
+  const { page_id, mode, record_id, ...fields } = req.body || {};
   if (!page_id || !mode) {
     return res.json({ success: false, error: 'page_id and mode required' });
   }
@@ -208,7 +210,7 @@ app.post('/api/dml', async (req, res) => {
       page_id: Number(page_id),
       mode,
       data: fields,
-      pk_val: id ? Number(id) : null,
+      pk_val: record_id ? Number(record_id) : null,
       user: 'paul'
     });
     res.json(result);
