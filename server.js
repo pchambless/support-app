@@ -23,7 +23,7 @@ app.get('/', (req, res) => res.redirect('/agile-board'));
 app.get('/agile-board', async (req, res) => {
   try {
     const pageRows = await callWorkflow('server-query', {
-      query: `SELECT p.id AS page_id, pc.comp_name, pc.slot_name, pc.actions, ht.name AS template_name
+      query: `SELECT p.id AS page_id, p.table_config, pc.comp_name, pc.slot_name, pc.actions, ht.name AS template_name
               FROM support.pages p
               JOIN support.page_components pc ON pc.page_id = p.id
               JOIN support.html_templates ht ON ht.id = pc.html_template_id
@@ -35,6 +35,8 @@ app.get('/agile-board', async (req, res) => {
     if (!Array.isArray(pageRows) || pageRows.length === 0) {
       return res.status(404).send('agile-board page has no components');
     }
+
+    const tableConfig = pageRows[0].table_config || {};
 
     const shellStyledHtml = await callWorkflow('server-query', {
       query: `SELECT app_engine.f_html_styled('support', 'grid-form-page') as html`,
@@ -62,8 +64,12 @@ app.get('/agile-board', async (req, res) => {
     let layoutHtml = await resolveLayout([], config);
     layoutHtml = layoutHtml.replace('{{slot:page}}', pageHtml);
 
-    const pageMetaScript = `<script>window.__pageContext = { pageId: ${pageRows[0].page_id}, contextKey: "agile_id", form: "agile_form", hideCrud: true };</script>`;
-    res.send(wrapHtml('Agile Board', pageMetaScript + layoutHtml, config));
+    // hideCrud stays true regardless of table_config.template_type === 'crud':
+    // /api/dml doesn't exist yet (no write path built), so an Add New button
+    // would just 404. Once dml is wired up, this should read from config
+    // instead of overriding it.
+    const pageMetaScript = `<script>window.__pageContext = { pageId: ${pageRows[0].page_id}, contextKey: ${JSON.stringify(tableConfig.contextKey || 'id')}, form: ${JSON.stringify(tableConfig.form || '')}, hideCrud: true };</script>`;
+    res.send(wrapHtml(tableConfig.pageTitle || 'Support', pageMetaScript + layoutHtml, config));
   } catch (err) {
     console.error('[agile-board] render failed', err);
     res.status(500).send(`Render failed: ${err.message}`);
