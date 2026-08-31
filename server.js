@@ -7,7 +7,7 @@ import { resolveLayout, buildHtmxDiv, wrapHtml, callWorkflow } from 'app-engine'
 // trust is the honest answer for now). See memory/project_app_template_epic.md.
 const config = {
   schema: 'support',
-  layoutTemplateName: 'wf_layout',
+  layoutTemplateName: 'app_layout',
   navCssClass: 'appbar-nav',
   loginPath: '/agile-board'
 };
