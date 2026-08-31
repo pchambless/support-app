@@ -6,32 +6,58 @@ import { resolveLayout, buildHtmxDiv, buildSelectWidget, wrapHtml, callWorkflow 
 // authorization, not authentication; for a single trusted user, network-level
 // trust is the honest answer for now). See memory/project_app_template_epic.md.
 //
-// App-dropdown -> grid refresh: support has no context_store/c_getval() the
-// way whatsfresh does (that's genuinely whatsfresh-specific machinery, not
-// something to port prematurely for one dropdown) - so this is plain client
-// JS instead of the generic setVals+refreshComponents flow, via wrapHtml's
-// sanctioned extraScripts escape hatch for app-specific behavior.
-const APP_DROPDOWN_SCRIPT = `
-  document.addEventListener('change', async (e) => {
-    const sel = e.target.closest('#agile-app-dd select');
-    if (!sel) return;
+// App-dropdown + status-filter -> grid refresh: support has no
+// context_store/c_getval() the way whatsfresh does (that's genuinely
+// whatsfresh-specific machinery, not something to port prematurely for a
+// couple of controls) - so this is plain client JS instead of the generic
+// setVals+refreshComponents flow, via wrapHtml's sanctioned extraScripts
+// escape hatch for app-specific behavior. Both controls share state so
+// changing one doesn't reset the other.
+const AGILE_BOARD_FILTER_SCRIPT = `
+  let agileBoardAppId = '58';
+  let agileBoardStatus = 'All';
+
+  async function refreshAgileBoardGrid() {
     const grid = document.getElementById('agile-board-grid');
     if (!grid) return;
     const resp = await fetch('/api/hydrate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({ template_name: 'agile_hier_grid', id: sel.value || '58', status: 'All' })
+      body: new URLSearchParams({ template_name: 'agile_hier_grid', id: agileBoardAppId, status: agileBoardStatus })
     });
     grid.innerHTML = await resp.text();
+  }
+
+  document.addEventListener('change', (e) => {
+    const sel = e.target.closest('#agile-app-dd select');
+    if (!sel) return;
+    agileBoardAppId = sel.value || '58';
+    refreshAgileBoardGrid();
+  });
+
+  document.addEventListener('click', (e) => {
+    const btn = e.target.closest('.status-filter-btn');
+    if (!btn) return;
+    agileBoardStatus = btn.dataset.status;
+    document.querySelectorAll('.status-filter-btn').forEach((b) => b.classList.toggle('active', b === btn));
+    refreshAgileBoardGrid();
   });
 `;
+
+const STATUS_FILTER_HTML = `<div class="status-filter-group">
+  <button type="button" class="status-filter-btn active" data-status="All">All</button>
+  <button type="button" class="status-filter-btn" data-status="In Progress">In Progress</button>
+  <button type="button" class="status-filter-btn" data-status="To Do">To Do</button>
+  <button type="button" class="status-filter-btn" data-status="Done">Done</button>
+  <button type="button" class="status-filter-btn" data-status="Blocked">Blocked</button>
+</div>`;
 
 const config = {
   schema: 'support',
   layoutTemplateName: 'app_layout',
   navCssClass: 'appbar-nav',
   loginPath: '/agile-board',
-  extraScripts: [APP_DROPDOWN_SCRIPT]
+  extraScripts: [AGILE_BOARD_FILTER_SCRIPT]
 };
 
 const app = express();
@@ -87,6 +113,10 @@ app.get('/agile-board', async (req, res) => {
           });
       pageHtml = pageHtml.replace(slotToken, widget);
     }
+    // Status filter buttons: static UI chrome, not data-driven, so this is
+    // hand-built rather than a page_components row - reuses the dropdown-2
+    // slot the shell already has.
+    pageHtml = pageHtml.replace('{{slot:dropdown-2}}', STATUS_FILTER_HTML);
     // No context-btn/crud-button components built yet for this page - strip
     // remaining unresolved shell tokens rather than leave literal {{slot:x}}.
     pageHtml = pageHtml
@@ -96,10 +126,8 @@ app.get('/agile-board', async (req, res) => {
     let layoutHtml = await resolveLayout([], config);
     layoutHtml = layoutHtml.replace('{{slot:page}}', pageHtml);
 
-    // hideCrud stays hardcoded true for now: /api/dml doesn't exist yet (no
-    // write path built), so an Add New button would just 404.
     const { page_id, context_key, form_template, page_title } = pageRows[0];
-    const pageMetaScript = `<script>window.__pageContext = { pageId: ${page_id}, contextKey: ${JSON.stringify(context_key || 'id')}, form: ${JSON.stringify(form_template || '')}, hideCrud: true };</script>`;
+    const pageMetaScript = `<script>window.__pageContext = { pageId: ${page_id}, contextKey: ${JSON.stringify(context_key || 'id')}, form: ${JSON.stringify(form_template || '')}, hideCrud: false };</script>`;
     res.send(wrapHtml(page_title || 'Support', pageMetaScript + layoutHtml, config));
   } catch (err) {
     console.error('[agile-board] render failed', err);
@@ -140,19 +168,53 @@ app.post('/api/hydrate', async (req, res) => {
       return res.type('html').send(Handlebars.compile(styledHtml)({}));
     }
 
-    const hydrateParams = { id: 58, status: 'All', ...contextParams };
-    const rows = await callWorkflow('server-query', {
-      query: hydrateSql,
-      params: hydrateParams,
-      source: 'server'
-    });
-    const dataArr = Array.isArray(rows) ? rows : [];
+    let dataArr;
+    if (contextParams.mode === 'INSERT') {
+      // New record: render the form against one blank row rather than
+      // running the hydrate SQL, which would otherwise fall back to the
+      // default id (58) and populate the "new" form with an existing row.
+      dataArr = [{}];
+    } else {
+      const hydrateParams = { id: 58, status: 'All', ...contextParams };
+      const rows = await callWorkflow('server-query', {
+        query: hydrateSql,
+        params: hydrateParams,
+        source: 'server'
+      });
+      dataArr = Array.isArray(rows) ? rows : [];
+    }
 
     const html = Handlebars.compile(styledHtml)({ data: dataArr });
     res.type('html').send(html);
   } catch (err) {
     console.error('[hydrate] failed', err);
     res.status(500).type('text').send('Hydration failed: ' + err.message);
+  }
+});
+
+// Real write path: app-engine-actions (new, generic n8n workflow wrapping
+// app_engine.dml()) - part of the app-engine workflow set, not a whatsfresh
+// workflow. Field "id" doubles as the form's pk carrier (formActions.js
+// submits it as a plain field) and app_engine.dml()'s separate pk_val arg -
+// split it out here rather than passing it through as a data column.
+app.post('/api/dml', async (req, res) => {
+  const { page_id, mode, id, ...fields } = req.body || {};
+  if (!page_id || !mode) {
+    return res.json({ success: false, error: 'page_id and mode required' });
+  }
+  try {
+    const result = await callWorkflow('app-engine-actions', {
+      schema: 'support',
+      page_id: Number(page_id),
+      mode,
+      data: fields,
+      pk_val: id ? Number(id) : null,
+      user: 'paul'
+    });
+    res.json(result);
+  } catch (err) {
+    console.error('[dml] failed', err);
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 
