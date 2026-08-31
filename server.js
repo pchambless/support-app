@@ -1,15 +1,37 @@
 import express from 'express';
 import Handlebars from 'handlebars';
-import { resolveLayout, buildHtmxDiv, wrapHtml, callWorkflow } from 'app-engine';
+import { resolveLayout, buildHtmxDiv, buildSelectWidget, wrapHtml, callWorkflow } from 'app-engine';
 
 // No login/session flow - support has no login screen (JSON allowlist is
 // authorization, not authentication; for a single trusted user, network-level
 // trust is the honest answer for now). See memory/project_app_template_epic.md.
+//
+// App-dropdown -> grid refresh: support has no context_store/c_getval() the
+// way whatsfresh does (that's genuinely whatsfresh-specific machinery, not
+// something to port prematurely for one dropdown) - so this is plain client
+// JS instead of the generic setVals+refreshComponents flow, via wrapHtml's
+// sanctioned extraScripts escape hatch for app-specific behavior.
+const APP_DROPDOWN_SCRIPT = `
+  document.addEventListener('change', async (e) => {
+    const sel = e.target.closest('#agile-app-dd select');
+    if (!sel) return;
+    const grid = document.getElementById('agile-board-grid');
+    if (!grid) return;
+    const resp = await fetch('/api/hydrate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ template_name: 'agile_hier_grid', id: sel.value || '58', status: 'All' })
+    });
+    grid.innerHTML = await resp.text();
+  });
+`;
+
 const config = {
   schema: 'support',
   layoutTemplateName: 'app_layout',
   navCssClass: 'appbar-nav',
-  loginPath: '/agile-board'
+  loginPath: '/agile-board',
+  extraScripts: [APP_DROPDOWN_SCRIPT]
 };
 
 const app = express();
@@ -24,7 +46,8 @@ app.get('/agile-board', async (req, res) => {
   try {
     const pageRows = await callWorkflow('server-query', {
       query: `SELECT p.id AS page_id, p.context_key, p.form_template, p.page_title,
-                     pc.comp_name, pc.slot_name, pc.actions, ht.name AS template_name
+                     pc.comp_name, pc.slot_name, pc.actions, ht.name AS template_name,
+                     ht.title AS template_title, ht.platform
               FROM support.pages p
               JOIN support.page_components pc ON pc.page_id = p.id
               JOIN support.html_templates ht ON ht.id = pc.html_template_id
@@ -45,17 +68,27 @@ app.get('/agile-board', async (req, res) => {
     let pageHtml = Array.isArray(shellStyledHtml) ? shellStyledHtml[0]?.html : '';
 
     for (const row of pageRows) {
-      if (row.slot_name !== 'grid') continue;
-      const div = buildHtmxDiv({
-        comp_name: row.comp_name,
-        template_name: row.template_name,
-        page_id: row.page_id,
-        actions: row.actions || {}
-      });
-      pageHtml = pageHtml.replace('{{slot:grid}}', div);
+      const slotToken = `{{slot:${row.slot_name}}}`;
+      if (!pageHtml.includes(slotToken)) continue;
+
+      const isSelect = row.platform === 'dropdown' || row.platform === 'select';
+      const widget = isSelect
+        ? buildSelectWidget({
+            comp_name: row.comp_name,
+            template_name: row.template_name,
+            template_title: row.template_title,
+            actions: row.actions || {}
+          })
+        : buildHtmxDiv({
+            comp_name: row.comp_name,
+            template_name: row.template_name,
+            page_id: row.page_id,
+            actions: row.actions || {}
+          });
+      pageHtml = pageHtml.replace(slotToken, widget);
     }
-    // No dropdown/context-btn/crud-button components built yet for this page -
-    // strip the unresolved shell tokens rather than leave literal {{slot:x}} text.
+    // No context-btn/crud-button components built yet for this page - strip
+    // remaining unresolved shell tokens rather than leave literal {{slot:x}}.
     pageHtml = pageHtml
       .replace(/\{\{slot:dropdown-\d\}\}/g, '')
       .replace('{{slot:context-btn}}', '');
