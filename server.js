@@ -6,58 +6,17 @@ import { resolveLayout, buildHtmxDiv, buildSelectWidget, wrapHtml, callWorkflow 
 // authorization, not authentication; for a single trusted user, network-level
 // trust is the honest answer for now). See memory/project_app_template_epic.md.
 //
-// App-dropdown + status-filter -> grid refresh: support has no
-// context_store/c_getval() the way whatsfresh does (that's genuinely
-// whatsfresh-specific machinery, not something to port prematurely for a
-// couple of controls) - so this is plain client JS instead of the generic
-// setVals+refreshComponents flow, via wrapHtml's sanctioned extraScripts
-// escape hatch for app-specific behavior. Both controls share state so
-// changing one doesn't reset the other.
-const AGILE_BOARD_FILTER_SCRIPT = `
-  let agileBoardAppId = '58';
-  let agileBoardStatus = 'All';
-
-  async function refreshAgileBoardGrid() {
-    const grid = document.getElementById('agile-board-grid');
-    if (!grid) return;
-    const resp = await fetch('/api/hydrate', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({ template_name: 'agile_hier_grid', id: agileBoardAppId, status: agileBoardStatus })
-    });
-    grid.innerHTML = await resp.text();
-  }
-
-  document.addEventListener('change', (e) => {
-    const sel = e.target.closest('#agile-app-dd select');
-    if (!sel) return;
-    agileBoardAppId = sel.value || '58';
-    refreshAgileBoardGrid();
-  });
-
-  document.addEventListener('click', (e) => {
-    const btn = e.target.closest('.status-filter-btn');
-    if (!btn) return;
-    agileBoardStatus = btn.dataset.status;
-    document.querySelectorAll('.status-filter-btn').forEach((b) => b.classList.toggle('active', b === btn));
-    refreshAgileBoardGrid();
-  });
-`;
-
-const STATUS_FILTER_HTML = `<div class="status-filter-group">
-  <button type="button" class="status-filter-btn active" data-status="All">All</button>
-  <button type="button" class="status-filter-btn" data-status="In Progress">In Progress</button>
-  <button type="button" class="status-filter-btn" data-status="To Do">To Do</button>
-  <button type="button" class="status-filter-btn" data-status="Done">Done</button>
-  <button type="button" class="status-filter-btn" data-status="Blocked">Blocked</button>
-</div>`;
+// App dropdown + status/priority filters all now go through the generic
+// page_components.actions declarative path (setVals + refresh), same as
+// every other app_engine app - no bespoke client JS needed here. See
+// app-engine's buildHtmxDiv/buildSelectWidget (dynamic js: hx-vals reading
+// window.contextStore) and actionHandlers.js's setVals+refresh short-circuit.
 
 const config = {
   schema: 'support',
   layoutTemplateName: 'app_layout',
   navCssClass: 'appbar-nav',
-  loginPath: '/agile-board',
-  extraScripts: [AGILE_BOARD_FILTER_SCRIPT]
+  loginPath: '/agile-board'
 };
 
 const app = express();
@@ -113,10 +72,6 @@ app.get('/agile-board', async (req, res) => {
           });
       pageHtml = pageHtml.replace(slotToken, widget);
     }
-    // Status filter buttons: static UI chrome, not data-driven, so this is
-    // hand-built rather than a page_components row - reuses the dropdown-2
-    // slot the shell already has.
-    pageHtml = pageHtml.replace('{{slot:dropdown-2}}', STATUS_FILTER_HTML);
     // No context-btn/crud-button components built yet for this page - strip
     // remaining unresolved shell tokens rather than leave literal {{slot:x}}.
     pageHtml = pageHtml
@@ -175,7 +130,7 @@ app.post('/api/hydrate', async (req, res) => {
       // default id (58) and populate the "new" form with an existing row.
       dataArr = [{}];
     } else {
-      const hydrateParams = { id: 58, status: 'All', ...contextParams };
+      const hydrateParams = { id: 58, status: 'All', priority: 'All', ...contextParams };
       const rows = await callWorkflow('server-query', {
         query: hydrateSql,
         params: hydrateParams,
