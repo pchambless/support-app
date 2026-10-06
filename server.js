@@ -82,7 +82,11 @@ app.get('/agile-board', async (req, res) => {
     layoutHtml = layoutHtml.replace('{{slot:page}}', pageHtml);
 
     const { page_id, context_key, form_template, page_title } = pageRows[0];
-    const pageMetaScript = `<script>window.__pageContext = { pageId: ${page_id}, contextKey: ${JSON.stringify(context_key || 'id')}, form: ${JSON.stringify(form_template || '')}, hideCrud: false };</script>`;
+    // Lets the inline-form submit handler (formActions.js) refresh just the
+    // grid instead of reloading the whole page - any page with a platform:
+    // grid component gets this for free, no per-page wiring needed.
+    const gridComponentId = pageRows.find(r => r.platform === 'grid')?.comp_name || null;
+    const pageMetaScript = `<script>window.__pageContext = { pageId: ${page_id}, contextKey: ${JSON.stringify(context_key || 'id')}, form: ${JSON.stringify(form_template || '')}, hideCrud: false, gridComponentId: ${JSON.stringify(gridComponentId)} };</script>`;
     res.send(wrapHtml(page_title || 'Support', pageMetaScript + layoutHtml, config));
   } catch (err) {
     console.error('[agile-board] render failed', err);
@@ -130,7 +134,7 @@ app.post('/api/hydrate', async (req, res) => {
       // default id (58) and populate the "new" form with an existing row.
       dataArr = [{}];
     } else {
-      const hydrateParams = { id: 58, status: 'All', priority: 'All', ...contextParams };
+      const hydrateParams = { id: 58, app_id: 58, status: 'All', priority: 'All', ...contextParams };
       const rows = await callWorkflow('server-query', {
         query: hydrateSql,
         params: hydrateParams,
@@ -171,6 +175,156 @@ app.post('/api/dml', async (req, res) => {
     res.json(result);
   } catch (err) {
     console.error('[dml] failed', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Deploy Steps (task 403, Sprint 404): the driver page. 'deploy' is the
+// standing URL prefix for every deployment-area page (Paul, 2026-09-07).
+// Two stacked components, ordered by page_components.ordr: the steps
+// overview (all deployment.deploy_steps rows + latest signoff, read-only)
+// and the active step's own widget below it - today just Compare
+// (compare_grid). Superseded the old standalone /compare page/component/nav
+// entry, all soft-deleted same session.
+app.get('/deploy-steps', async (req, res) => {
+  try {
+    const pageRows = await callWorkflow('server-query', {
+      query: `SELECT p.id AS page_id, p.page_title,
+                     pc.comp_name, pc.slot_name, pc.actions, pc.ordr, ht.name AS template_name, ht.platform
+              FROM support.pages p
+              JOIN support.page_components pc ON pc.page_id = p.id
+              JOIN support.html_templates ht ON ht.id = pc.html_template_id
+              WHERE p.page_name = 'deploy-steps'
+              ORDER BY pc.ordr`,
+      params: {},
+      source: 'server'
+    });
+
+    if (!Array.isArray(pageRows) || pageRows.length === 0) {
+      return res.status(404).send('deploy-steps page has no components');
+    }
+
+    const pageHtml = pageRows.map(row => buildHtmxDiv({
+      comp_name: row.comp_name,
+      template_name: row.template_name,
+      page_id: row.page_id,
+      actions: row.actions || {}
+    })).join('\n');
+
+    let layoutHtml = await resolveLayout([], config);
+    layoutHtml = layoutHtml.replace('{{slot:page}}', pageHtml);
+
+    const pageMetaScript = `<script>window.__pageContext = { pageId: ${pageRows[0].page_id}, contextKey: 'id', form: '', hideCrud: true, gridComponentId: null };</script>`;
+    res.send(wrapHtml(pageRows[0].page_title || 'Deploy Steps', pageMetaScript + layoutHtml, config));
+  } catch (err) {
+    console.error('[deploy-steps] render failed', err);
+    res.status(500).send(`Render failed: ${err.message}`);
+  }
+});
+
+// Deploy Dashboard: placeholder (task 403 follow-on). Content deliberately
+// not decided yet - Paul, 2026-09-07: "not sure what would be pertinent",
+// settling with use rather than guessing. Route exists so the nav entry
+// resolves to something real instead of a 404.
+app.get('/deploy-dashboard', async (req, res) => {
+  const pageHtml = `<div class="table page-grid"><p>Deploy Dashboard - not built yet. Will show release status, last signoffs, dev/prod gap counts, and infra version drift once decided.</p></div>`;
+  let layoutHtml = await resolveLayout([], config);
+  layoutHtml = layoutHtml.replace('{{slot:page}}', pageHtml);
+  res.send(wrapHtml('Deploy Dashboard', layoutHtml, config));
+});
+
+// Refresh button backend: runs deployment.f_refresh_compare() (f_scan() +
+// f_capture_env_fingerprints('prod')) before the grid re-hydrates off
+// vw_object_fingerprints - that view is a snapshot and lies if stale (the
+// dead-f_scan incident, handoff #50), so every read of it here is preceded
+// by a real scan, never a raw read.
+app.post('/api/refresh-compare', async (req, res) => {
+  try {
+    const result = await callWorkflow('refresh-compare', {});
+    const row = Array.isArray(result) ? result[0] : result;
+    res.json({ success: true, ...row });
+  } catch (err) {
+    console.error('[refresh-compare] failed', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Signoff button backend: records human approval against the current
+// pending release + the compare step, snapshotting the approved diff counts
+// into result (deployment.step_signoffs.result is designed to hold exactly
+// this). Goes through server-query like every other DB write here - support-app
+// never opens a direct DB connection, only n8n webhooks (Guide: "wf-server
+// stays thin", same rule for support-app).
+app.post('/api/signoff', async (req, res) => {
+  // req.body.step_id arrives as a string - it came off a data-* attribute
+  // (always text) via contextStore, not a real form input.
+  const step_id = parseInt(req.body?.step_id, 10);
+  if (!Number.isInteger(step_id)) return res.json({ success: false, error: 'step_id required' });
+  try {
+    const rows = await callWorkflow('server-query', {
+      query: `WITH gap AS (
+                SELECT jsonb_build_object(
+                  'differs', count(*) FILTER (WHERE dev_fp IS DISTINCT FROM prod_fp),
+                  'missing_on_prod', count(*) FILTER (WHERE prod_fp IS NULL AND dev_fp IS NOT NULL),
+                  'extra_on_prod', count(*) FILTER (WHERE dev_fp IS NULL AND prod_fp IS NOT NULL),
+                  'snapshotted_at', now()
+                ) AS result
+                FROM deployment.vw_object_fingerprints
+              )
+              INSERT INTO deployment.step_signoffs (release_id, step_id, env_id, signed_by, result)
+              SELECT
+                (SELECT id FROM deployment.releases WHERE status = 'pending' ORDER BY id DESC LIMIT 1),
+                :step_id,
+                (SELECT id FROM deployment.environments WHERE name = 'prod'),
+                'paul',
+                gap.result
+              FROM gap
+              RETURNING id, signed_at, result`,
+      params: { step_id },
+      source: 'server'
+    });
+    const row = Array.isArray(rows) ? rows[0] : rows;
+    if (!row) return res.json({ success: false, error: 'signoff insert returned no row' });
+    res.json({ success: true, ...row });
+  } catch (err) {
+    console.error('[signoff] failed', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Reversible per Paul (2026-09-07): soft-deletes rather than hard-deletes,
+// so the audit trail keeps who signed AND who revoked. Revokes the latest
+// live signoff for this step+release - if two people were both approving
+// in the same window this takes the most recent, which is an accepted
+// simplification for a single-trusted-user app (no login yet).
+app.post('/api/signoff/revoke', async (req, res) => {
+  const step_id = parseInt(req.body?.step_id, 10);
+  if (!Number.isInteger(step_id)) return res.json({ success: false, error: 'step_id required' });
+  try {
+    const rows = await callWorkflow('server-query', {
+      query: `UPDATE deployment.step_signoffs
+              SET deleted_at = now(), deleted_by = 'paul'
+              WHERE id = (
+                SELECT ss.id
+                FROM deployment.step_signoffs ss
+                WHERE ss.step_id = :step_id
+                  AND ss.release_id = (SELECT id FROM deployment.releases WHERE status = 'pending' ORDER BY id DESC LIMIT 1)
+                  AND ss.deleted_at IS NULL
+                ORDER BY ss.signed_at DESC
+                LIMIT 1
+              )
+              RETURNING id`,
+      params: { step_id },
+      source: 'server'
+    });
+    // server-query returns [{}] (one empty object), not [], when 0 rows match -
+    // check row.id specifically, not row's truthiness (Guide 23: never read
+    // empty output as success).
+    const row = Array.isArray(rows) ? rows[0] : rows;
+    if (!row?.id) return res.json({ success: false, error: 'No active signoff to revoke' });
+    res.json({ success: true, revoked_id: row.id });
+  } catch (err) {
+    console.error('[signoff/revoke] failed', err);
     res.status(500).json({ success: false, error: err.message });
   }
 });
