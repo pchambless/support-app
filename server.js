@@ -27,7 +27,10 @@ app.get('/health', (req, res) => res.send('ok'));
 
 app.get('/', (req, res) => res.redirect('/agile-board'));
 
-app.get('/agile-board', async (req, res) => {
+// Every grid + inline-form page (agile-board, feedback) renders the same way: the page's
+// components come from support.pages/page_components, composed into the grid-form-page shell.
+// One function, one route per page_name (task 477 added /feedback as the second caller).
+async function renderGridFormPage(pageName, res) {
   try {
     const pageRows = await callWorkflow('server-query', {
       query: `SELECT p.id AS page_id, p.context_key, p.form_template, p.page_title,
@@ -36,13 +39,13 @@ app.get('/agile-board', async (req, res) => {
               FROM support.pages p
               JOIN support.page_components pc ON pc.page_id = p.id
               JOIN support.html_templates ht ON ht.id = pc.html_template_id
-              WHERE p.page_name = 'agile-board'`,
-      params: {},
+              WHERE p.page_name = :page_name`,
+      params: { page_name: pageName },
       source: 'server'
     });
 
     if (!Array.isArray(pageRows) || pageRows.length === 0) {
-      return res.status(404).send('agile-board page has no components');
+      return res.status(404).send(`${pageName} page has no components`);
     }
 
     const shellStyledHtml = await callWorkflow('server-query', {
@@ -89,10 +92,13 @@ app.get('/agile-board', async (req, res) => {
     const pageMetaScript = `<script>window.__pageContext = { pageId: ${page_id}, contextKey: ${JSON.stringify(context_key || 'id')}, form: ${JSON.stringify(form_template || '')}, hideCrud: false, gridComponentId: ${JSON.stringify(gridComponentId)} };</script>`;
     res.send(wrapHtml(page_title || 'Support', pageMetaScript + layoutHtml, config));
   } catch (err) {
-    console.error('[agile-board] render failed', err);
+    console.error(`[${pageName}] render failed`, err);
     res.status(500).send(`Render failed: ${err.message}`);
   }
-});
+}
+
+app.get('/agile-board', (req, res) => renderGridFormPage('agile-board', res));
+app.get('/feedback', (req, res) => renderGridFormPage('feedback', res));
 
 // Real hydration: fetch the template's own hydrate SQL, run it with whatever
 // context params htmx sent, compile the (possibly css-wrapped) handlebars
