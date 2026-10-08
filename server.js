@@ -1,6 +1,6 @@
 import express from 'express';
 import Handlebars from 'handlebars';
-import { resolveLayout, buildHtmxDiv, buildSelectWidget, wrapHtml, callWorkflow } from 'app-engine';
+import { createRenderPage, loadAppConfig, wrapHtml, callWorkflow } from 'app-engine';
 
 // No login/session flow - support has no login screen (JSON allowlist is
 // authorization, not authentication; for a single trusted user, network-level
@@ -12,12 +12,13 @@ import { resolveLayout, buildHtmxDiv, buildSelectWidget, wrapHtml, callWorkflow 
 // app-engine's buildHtmxDiv/buildSelectWidget (dynamic js: hx-vals reading
 // window.contextStore) and actionHandlers.js's setVals+refresh short-circuit.
 
-const config = {
-  schema: 'support',
-  layoutTemplateName: 'app_layout',
-  navCssClass: 'appbar-nav',
-  loginPath: '/agile-board'
-};
+// Config is DATA: resolved from app_engine.apps (domain support.whatsfresh.app)
+// at startup via loadAppConfig, not hand-written here. Single-app process, so
+// we load it once by the known domain rather than per-request-host (locally the
+// host is localhost:3002, not the real domain). Set in startServer().
+const APP_DOMAIN = 'support.whatsfresh.app';
+let config = null;              // AppConfig, populated at startup
+let renderPage, setRoutes;      // from createRenderPage(config)
 
 const app = express();
 app.use(express.json());
@@ -27,78 +28,10 @@ app.get('/health', (req, res) => res.send('ok'));
 
 app.get('/', (req, res) => res.redirect('/agile-board'));
 
-// Every grid + inline-form page (agile-board, feedback) renders the same way: the page's
-// components come from support.pages/page_components, composed into the grid-form-page shell.
-// One function, one route per page_name (task 477 added /feedback as the second caller).
-async function renderGridFormPage(pageName, res) {
-  try {
-    const pageRows = await callWorkflow('server-query', {
-      query: `SELECT p.id AS page_id, p.context_key, p.form_template, p.page_title,
-                     pc.comp_name, pc.slot_name, pc.actions, ht.name AS template_name,
-                     ht.title AS template_title, ht.platform
-              FROM support.pages p
-              JOIN support.page_components pc ON pc.page_id = p.id
-              JOIN support.html_templates ht ON ht.id = pc.html_template_id
-              WHERE p.page_name = :page_name`,
-      params: { page_name: pageName },
-      source: 'server'
-    });
-
-    if (!Array.isArray(pageRows) || pageRows.length === 0) {
-      return res.status(404).send(`${pageName} page has no components`);
-    }
-
-    const shellStyledHtml = await callWorkflow('server-query', {
-      query: `SELECT app_engine.f_html_styled('support', 'grid-form-page') as html`,
-      params: {},
-      source: 'server'
-    });
-    let pageHtml = Array.isArray(shellStyledHtml) ? shellStyledHtml[0]?.html : '';
-
-    for (const row of pageRows) {
-      const slotToken = `{{slot:${row.slot_name}}}`;
-      if (!pageHtml.includes(slotToken)) continue;
-
-      const isSelect = row.platform === 'dropdown' || row.platform === 'select';
-      const widget = isSelect
-        ? buildSelectWidget({
-            comp_name: row.comp_name,
-            template_name: row.template_name,
-            template_title: row.template_title,
-            actions: row.actions || {}
-          })
-        : buildHtmxDiv({
-            comp_name: row.comp_name,
-            template_name: row.template_name,
-            page_id: row.page_id,
-            actions: row.actions || {}
-          });
-      pageHtml = pageHtml.replace(slotToken, widget);
-    }
-    // No context-btn/crud-button components built yet for this page - strip
-    // remaining unresolved shell tokens rather than leave literal {{slot:x}}.
-    pageHtml = pageHtml
-      .replace(/\{\{slot:dropdown-\d\}\}/g, '')
-      .replace('{{slot:context-btn}}', '');
-
-    let layoutHtml = await resolveLayout([], config);
-    layoutHtml = layoutHtml.replace('{{slot:page}}', pageHtml);
-
-    const { page_id, context_key, form_template, page_title } = pageRows[0];
-    // Lets the inline-form submit handler (formActions.js) refresh just the
-    // grid instead of reloading the whole page - any page with a platform:
-    // grid component gets this for free, no per-page wiring needed.
-    const gridComponentId = pageRows.find(r => r.platform === 'grid')?.comp_name || null;
-    const pageMetaScript = `<script>window.__pageContext = { pageId: ${page_id}, contextKey: ${JSON.stringify(context_key || 'id')}, form: ${JSON.stringify(form_template || '')}, hideCrud: false, gridComponentId: ${JSON.stringify(gridComponentId)} };</script>`;
-    res.send(wrapHtml(page_title || 'Support', pageMetaScript + layoutHtml, config));
-  } catch (err) {
-    console.error(`[${pageName}] render failed`, err);
-    res.status(500).send(`Render failed: ${err.message}`);
-  }
-}
-
-app.get('/agile-board', (req, res) => renderGridFormPage('agile-board', res));
-app.get('/feedback', (req, res) => renderGridFormPage('feedback', res));
+// Pages are DATA, routes are DERIVED (guidance 36 / app-engine contract):
+// no per-page routes. Every GET page is served by the one generic renderPage
+// from app-engine's createRenderPage, keyed off the route list loaded from
+// support.vw_pages at startup. Add a page row + restart = new page, zero code.
 
 // Real hydration: fetch the template's own hydrate SQL, run it with whatever
 // context params htmx sent, compile the (possibly css-wrapped) handlebars
@@ -185,59 +118,9 @@ app.post('/api/dml', async (req, res) => {
   }
 });
 
-// Deploy Steps (task 403, Sprint 404): the driver page. 'deploy' is the
-// standing URL prefix for every deployment-area page (Paul, 2026-09-07).
-// Two stacked components, ordered by page_components.ordr: the steps
-// overview (all deployment.deploy_steps rows + latest signoff, read-only)
-// and the active step's own widget below it - today just Compare
-// (compare_grid). Superseded the old standalone /compare page/component/nav
-// entry, all soft-deleted same session.
-app.get('/deploy-steps', async (req, res) => {
-  try {
-    const pageRows = await callWorkflow('server-query', {
-      query: `SELECT p.id AS page_id, p.page_title,
-                     pc.comp_name, pc.slot_name, pc.actions, pc.ordr, ht.name AS template_name, ht.platform
-              FROM support.pages p
-              JOIN support.page_components pc ON pc.page_id = p.id
-              JOIN support.html_templates ht ON ht.id = pc.html_template_id
-              WHERE p.page_name = 'deploy-steps'
-              ORDER BY pc.ordr`,
-      params: {},
-      source: 'server'
-    });
-
-    if (!Array.isArray(pageRows) || pageRows.length === 0) {
-      return res.status(404).send('deploy-steps page has no components');
-    }
-
-    const pageHtml = pageRows.map(row => buildHtmxDiv({
-      comp_name: row.comp_name,
-      template_name: row.template_name,
-      page_id: row.page_id,
-      actions: row.actions || {}
-    })).join('\n');
-
-    let layoutHtml = await resolveLayout([], config);
-    layoutHtml = layoutHtml.replace('{{slot:page}}', pageHtml);
-
-    const pageMetaScript = `<script>window.__pageContext = { pageId: ${pageRows[0].page_id}, contextKey: 'id', form: '', hideCrud: true, gridComponentId: null };</script>`;
-    res.send(wrapHtml(pageRows[0].page_title || 'Deploy Steps', pageMetaScript + layoutHtml, config));
-  } catch (err) {
-    console.error('[deploy-steps] render failed', err);
-    res.status(500).send(`Render failed: ${err.message}`);
-  }
-});
-
-// Deploy Dashboard: placeholder (task 403 follow-on). Content deliberately
-// not decided yet - Paul, 2026-09-07: "not sure what would be pertinent",
-// settling with use rather than guessing. Route exists so the nav entry
-// resolves to something real instead of a 404.
-app.get('/deploy-dashboard', async (req, res) => {
-  const pageHtml = `<div class="table page-grid"><p>Deploy Dashboard - not built yet. Will show release status, last signoffs, dev/prod gap counts, and infra version drift once decided.</p></div>`;
-  let layoutHtml = await resolveLayout([], config);
-  layoutHtml = layoutHtml.replace('{{slot:page}}', pageHtml);
-  res.send(wrapHtml('Deploy Dashboard', layoutHtml, config));
-});
+// NOTE: deploy-steps and deploy-dashboard are now served by the generic
+// renderPage (they are support.pages rows). deploy-dashboard's "not built yet"
+// content moved into its page template. No per-page routes here.
 
 // Refresh button backend: runs deployment.f_refresh_compare() (f_scan() +
 // f_capture_env_fingerprints('prod')) before the grid re-hydrates off
@@ -336,4 +219,39 @@ app.post('/api/signoff/revoke', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3002;
-app.listen(PORT, () => console.log(`support-app listening on ${PORT}`));
+
+async function startServer() {
+  // 1. Resolve this app's config from app_engine.apps (DB is source of truth).
+  config = await loadAppConfig(APP_DOMAIN);
+  if (!config) throw new Error(`No app_engine.apps row for domain ${APP_DOMAIN}`);
+
+  // 2. Build the generic renderer bound to this app's config.
+  ({ renderPage, setRoutes } = createRenderPage(config));
+
+  // 3. Derive the route list from the page registry (support.vw_pages). Each
+  //    row -> a route the catch-all can serve. No per-page code.
+  const routeRows = await callWorkflow('server-query', {
+    query: `SELECT route_path AS route, page_name, page_id, group_name
+              FROM support.vw_pages
+             ORDER BY group_name, page_name`,
+    params: {},
+    source: 'server'
+  });
+  const routes = Array.isArray(routeRows) ? routeRows : [];
+  setRoutes(routes);
+  console.log(`[support-app] loaded ${routes.length} route(s): ${routes.map(r => r.route).join(', ')}`);
+
+  // 4. One catch-all GET route -> the generic renderer. Everything above
+  //    (/health, /, /api/*) is registered before this and takes precedence.
+  //    NOTE: '*' is the Express 4 catch-all (support-app is on express 4.22);
+  //    wf-server uses '{*path}' because it is on express 5. Do not copy the
+  //    express-5 pattern here - it registers nothing in express 4 (silent 404).
+  app.get('*', renderPage);
+
+  app.listen(PORT, () => console.log(`support-app listening on ${PORT}`));
+}
+
+startServer().catch(err => {
+  console.error('[support-app] startup failed:', err);
+  process.exit(1);
+});
