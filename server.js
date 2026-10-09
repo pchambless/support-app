@@ -73,7 +73,7 @@ app.post('/api/hydrate', async (req, res) => {
       // default id (58) and populate the "new" form with an existing row.
       dataArr = [{}];
     } else {
-      const hydrateParams = { id: 58, app_id: 58, status: 'All', priority: 'All', ...contextParams };
+      const hydrateParams = { id: 58, app_id: 58, status: 'All', priority: 'All', selected_run_id: '', ...contextParams };
       const rows = await callWorkflow('server-query', {
         query: hydrateSql,
         params: hydrateParams,
