@@ -58,6 +58,11 @@ if [ -n "$($G status --porcelain --untracked-files=no)" ]; then
     exit 1
 fi
 
+# The app refuses to start without Access verification (task 602): fail BEFORE the restart, not after.
+for k in ACCESS_TEAM_DOMAIN ACCESS_AUD; do
+    grep -q "^$k=." .env || { echo "[droplet] ERROR: $k missing from $DIR/.env - add it before deploying (see README)" >&2; exit 1; }
+done
+
 $G pull -q --ff-only origin main
 echo "[droplet] at $($G log --oneline -1)"
 
@@ -65,7 +70,7 @@ npm ci --no-audit --no-fund 2>&1 | grep -E "added|up to date|error" || true
 
 pm2 restart "$NAME" >/dev/null
 for i in 1 2 3 4 5 6; do
-    code=$(curl -s -o /dev/null -w "%{http_code}" -m 5 "http://127.0.0.1:$PORT/agile-board" || true)
+    code=$(curl -s -o /dev/null -w "%{http_code}" -m 5 "http://127.0.0.1:$PORT/health" || true)
     [ "$code" = "200" ] && { echo "[droplet] health check ok (attempt $i)"; exit 0; }
     sleep 2
 done

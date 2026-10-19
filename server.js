@@ -1,10 +1,19 @@
 import express from 'express';
 import Handlebars from 'handlebars';
-import { createRenderPage, loadAppConfig, wrapHtml, callWorkflow } from 'app-engine';
+import { createRenderPage, loadAppConfig, wrapHtml, callWorkflow, createAccessGuard } from 'app-engine';
 
-// No login/session flow - support has no login screen (JSON allowlist is
-// authorization, not authentication; for a single trusted user, network-level
-// trust is the honest answer for now). See memory/project_app_template_epic.md.
+// No login/session flow - support has no login screen. Cloudflare Access is the front door (task 604) AND the app verifies Access's
+// signed token itself (task 602), because the droplet's address is reachable without going through Cloudflare. Refuses to start
+// open; ALLOW_NO_ACCESS=1 is for local development only.
+const { ACCESS_TEAM_DOMAIN, ACCESS_AUD, ACCESS_JWKS_URL, ALLOW_NO_ACCESS } = process.env;
+const guarded = Boolean(ACCESS_TEAM_DOMAIN && ACCESS_AUD);
+if (!guarded && ALLOW_NO_ACCESS !== '1') {
+  console.error('support-app: refusing to start without Cloudflare Access verification.\n' +
+    '  Set ACCESS_TEAM_DOMAIN (yourteam.cloudflareaccess.com) and ACCESS_AUD (the Access application Audience tag),\n' +
+    '  or ALLOW_NO_ACCESS=1 for local development only.');
+  process.exit(1);
+}
+if (!guarded) console.warn('support-app: WARNING running WITHOUT Access verification (ALLOW_NO_ACCESS=1). Local development only.');
 //
 // App dropdown + status/priority filters all now go through the generic
 // page_components.actions declarative path (setVals + refresh), same as
@@ -24,7 +33,8 @@ const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-app.get('/health', (req, res) => res.send('ok'));
+app.get('/health', (req, res) => res.send('ok'));      // the only open route; everything after the guard needs a valid Access token
+if (guarded) app.use(createAccessGuard({ teamDomain: ACCESS_TEAM_DOMAIN, audience: ACCESS_AUD, jwksUrl: ACCESS_JWKS_URL }));
 
 app.get('/', (req, res) => res.redirect('/agile-board'));
 
