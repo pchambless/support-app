@@ -76,5 +76,6 @@ REMOTE
 
 code=$(curl -s -o /dev/null -w "%{http_code}" -m 15 "$PUBLIC_URL" || true)
 echo "[public] $PUBLIC_URL -> $code"
-[ "$code" = "200" ] || { echo "ERROR: public URL not 200" >&2; exit 1; }
+# Cloudflare Access (task 604) answers an anonymous request with a 302 to the login page; 200 means Access is off.
+[ "$code" = "302" ] || { echo "ERROR: public URL not 302 (expected Cloudflare Access redirect)" >&2; exit 1; }
 echo "=== Done ($SHA) ==="
