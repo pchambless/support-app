@@ -1,6 +1,6 @@
 import express from 'express';
 import Handlebars from 'handlebars';
-import { createRenderPage, loadAppConfig, wrapHtml, callWorkflow, createAccessGuard } from 'app-engine';
+import { createRenderPage, loadAppConfig, wrapHtml, callWorkflow, createAccessGuard, createApiRoutes } from 'app-engine';
 
 // No login/session flow - support has no login screen. Cloudflare Access is the front door (task 604) AND the app verifies Access's
 // signed token itself (task 602), because the droplet's address is reachable without going through Cloudflare. Refuses to start
@@ -237,6 +237,10 @@ async function startServer() {
 
   // 2. Build the generic renderer bound to this app's config.
   ({ renderPage, setRoutes } = createRenderPage(config));
+
+  // The report modal (open_report) posts to /api/report. app-engine owns that handler (task 598); hydrate and dml above are
+  // still this app's own copies, so only the report route is taken from the shared set.
+  app.post('/api/report', createApiRoutes(config).report);
 
   // 3. Derive the route list from the page registry (support.vw_pages). Each
   //    row -> a route the catch-all can serve. No per-page code.
