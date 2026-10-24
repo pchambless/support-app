@@ -244,6 +244,10 @@ app.post('/api/trello-send', async (req, res) => {
     const why = row?.error ? `Trello said: ${row.error}` : 'Nothing was sent: it already has a card, or it is not a task.';
     res.json({ success: false, error: why });
   } catch (err) {
+    // No qualifying row means no last-node output, which n8n reports as HTTP 500 "No item to return was found".
+    if (String(err.message).includes('No item to return was found')) {
+      return res.json({ success: false, error: 'Nothing was sent: it already has a card, or it is not a task.' });
+    }
     console.error('[trello-send] failed', err);
     res.status(500).json({ success: false, error: err.message });
   }
