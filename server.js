@@ -228,6 +228,27 @@ app.post('/api/signoff/revoke', async (req, res) => {
   }
 });
 
+// Send to Trello button (agile board, dml_direct action with a custom endpoint): { mode, page_id, map_id, kind }.
+// The trello-sync workflow does the work and answers with the last node's output: { updated: N } when the card was created and recorded,
+// or an item carrying an error. An empty answer means nothing qualified (already has a card, not a task, unknown id).
+app.post('/api/trello-send', async (req, res) => {
+  const kind = req.body?.kind;
+  const id = parseInt(req.body?.map_id ?? req.body?.id, 10);
+  if (!['task', 'feedback'].includes(kind) || !Number.isInteger(id)) {
+    return res.json({ success: false, error: 'kind and an id are required' });
+  }
+  try {
+    const result = await callWorkflow('trello-sync', { kind, id });
+    const row = Array.isArray(result) ? result[0] : result;
+    if (row && Number(row.updated) >= 1) return res.json({ success: true });
+    const why = row?.error ? `Trello said: ${row.error}` : 'Nothing was sent: it already has a card, or it is not a task.';
+    res.json({ success: false, error: why });
+  } catch (err) {
+    console.error('[trello-send] failed', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 const PORT = process.env.PORT || 3002;
 
 async function startServer() {
