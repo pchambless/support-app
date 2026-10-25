@@ -100,6 +100,49 @@ app.post('/api/hydrate', async (req, res) => {
   }
 });
 
+// Feedback replies (task 658). Subject is fixed per item so Gmail keeps one thread; Reply-To is a plus-address
+// carrying the feedback id so an inbound reply can be filtered/matched later (FEEDBACK_REPLY_TO is the real mailbox).
+const FEEDBACK_PAGE_ID = 6;
+const FEEDBACK_REPLY_TO = process.env.FEEDBACK_REPLY_TO || 'pc7900@gmail.com';
+
+async function sendFeedbackReply(id, text) {
+  text = text.trim();
+  if (!Number.isInteger(id)) return { ok: false, error: 'No feedback record to reply to.' };
+  if (!text) return { ok: false, error: 'Write a reply first, or uncheck "Email this reply on Save".' };
+  const rows = await callWorkflow('server-query', {
+    query: 'SELECT id, email, title, message FROM support.feedback WHERE id = :id AND deleted_at IS NULL',
+    params: { id },
+    source: 'server'
+  });
+  const fb = Array.isArray(rows) ? rows[0] : rows;
+  if (!fb || !fb.email) return { ok: false, error: 'This feedback has no email address to reply to.' };
+
+  const subject = `[WhatsFresh #${id}] ${String(fb.title || 'Your feedback').replace(/\s+/g, ' ').trim()}`;
+  const quoted = String(fb.message || '').split('\n').map((l) => '> ' + l).join('\n');
+  const body = `${text}\n\n--\nIn reply to your feedback:\n${quoted}`;
+  const replyTo = FEEDBACK_REPLY_TO.replace('@', `+wf${id}@`);
+
+  try {
+    const res = await callWorkflow('send-email', { to: fb.email, subject, text: body, reply_to: replyTo });
+    if (!res || res.success !== true) return { ok: false, error: `Email not sent: ${res?.error || 'unknown error'}` };
+  } catch (err) {
+    console.error('[feedback-reply] send failed', err.message);
+    return { ok: false, error: `Email not sent: ${err.message}` };
+  }
+  try {
+    await callWorkflow('server-query', {
+      query: `INSERT INTO support.feedback_replies (feedback_id, direction, to_email, subject, body, sent_by)
+              VALUES (:id, 'out', :to_email, :subject, :body, 'paul') RETURNING id`,
+      params: { id, to_email: fb.email, subject, body: text },
+      source: 'server'
+    });
+  } catch (err) {
+    console.error('[feedback-reply] sent but not recorded', err.message);
+    return { ok: false, error: 'The email WAS sent, but recording it failed. Do not send it again; check the replies table.' };
+  }
+  return { ok: true };
+}
+
 // Real write path: app-engine-actions (new, generic n8n workflow wrapping
 // app_engine.dml()) - part of the app-engine workflow set, not a whatsfresh
 // workflow. Field is named record_id, not id - a form field literally named
@@ -108,11 +151,19 @@ app.post('/api/hydrate', async (req, res) => {
 // check (real bug, found live: it silently let the browser's native GET
 // submission through instead of calling /api/dml at all).
 app.post('/api/dml', async (req, res) => {
-  const { page_id, mode, record_id, ...fields } = req.body || {};
+  const { page_id, mode, record_id, reply_body, email_reply, ...fields } = req.body || {};
   if (!page_id || !mode) {
     return res.json({ success: false, error: 'page_id and mode required' });
   }
   try {
+    // Feedback triage form (page 6): the reply_body textarea and email_reply checkbox are not columns, so they
+    // are always stripped above; they only matter when the checkbox is on. The email goes out BEFORE the row is
+    // saved so a failed send leaves the form as it was.
+    if (Number(page_id) === FEEDBACK_PAGE_ID && mode === 'UPDATE' && email_reply === 'true') {
+      const sent = await sendFeedbackReply(Number(record_id), String(reply_body || ''));
+      if (!sent.ok) return res.json({ success: false, error: sent.error });
+      if (['new', 'reviewing'].includes(fields.status)) fields.status = 'replied';
+    }
     const result = await callWorkflow('app-engine-actions', {
       schema: 'support',
       page_id: Number(page_id),
