@@ -108,7 +108,7 @@ const FEEDBACK_REPLY_TO = process.env.FEEDBACK_REPLY_TO || 'pc7900@gmail.com';
 async function sendFeedbackReply(id, text) {
   text = text.trim();
   if (!Number.isInteger(id)) return { ok: false, error: 'No feedback record to reply to.' };
-  if (!text) return { ok: false, error: 'Write a reply first, or uncheck "Email this reply on Save".' };
+  if (!text) return { ok: false, error: 'Write a reply first.' };
   const rows = await callWorkflow('server-query', {
     query: 'SELECT id, email, title, message FROM support.feedback WHERE id = :id AND deleted_at IS NULL',
     params: { id },
@@ -156,10 +156,10 @@ app.post('/api/dml', async (req, res) => {
     return res.json({ success: false, error: 'page_id and mode required' });
   }
   try {
-    // Feedback triage form (page 6): the reply_body textarea and email_reply checkbox are not columns, so they
-    // are always stripped above; they only matter when the checkbox is on. The email goes out BEFORE the row is
-    // saved so a failed send leaves the form as it was.
-    if (Number(page_id) === FEEDBACK_PAGE_ID && mode === 'UPDATE' && email_reply === 'true') {
+    // Feedback triage form (page 6): reply_body is not a column, so it is always stripped above (email_reply is the
+    // retired checkbox; it is still stripped so an older form cannot reach the generic save). Pressing Save with text
+    // in the reply box sends it. The email goes out BEFORE the row is saved so a failed send leaves the form as it was.
+    if (Number(page_id) === FEEDBACK_PAGE_ID && mode === 'UPDATE' && String(reply_body || '').trim() !== '') {
       const sent = await sendFeedbackReply(Number(record_id), String(reply_body || ''));
       if (!sent.ok) return res.json({ success: false, error: sent.error });
       if (['new', 'reviewing'].includes(fields.status)) fields.status = 'replied';
