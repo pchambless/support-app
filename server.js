@@ -1,6 +1,6 @@
 import express from 'express';
 import Handlebars from 'handlebars';
-import { createRenderPage, loadAppConfig, wrapHtml, callWorkflow, createAccessGuard, createApiRoutes } from 'app-engine';
+import { createRenderPage, loadAppConfig, wrapHtml, callWorkflow, createAccessGuard, createUserGuard, createApiRoutes } from 'app-engine';
 
 // No login/session flow - support has no login screen. Cloudflare Access is the front door (task 604) AND the app verifies Access's
 // signed token itself (task 602), because the droplet's address is reachable without going through Cloudflare. Refuses to start
@@ -34,7 +34,13 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 app.get('/health', (req, res) => res.send('ok'));      // the only open route; everything after the guard needs a valid Access token
-if (guarded) app.use(createAccessGuard({ teamDomain: ACCESS_TEAM_DOMAIN, audience: ACCESS_AUD, jwksUrl: ACCESS_JWKS_URL }));
+if (guarded) {
+  app.use(createAccessGuard({ teamDomain: ACCESS_TEAM_DOMAIN, audience: ACCESS_AUD, jwksUrl: ACCESS_JWKS_URL }));
+  app.use(createUserGuard({ schema: 'support' }));   // task 909: only people in support.users get in (403 otherwise)
+}
+
+// Who is acting, for created_by/sent_by/signed_by (task 911): the verified Access email. DEV_USER covers local development without Access.
+const actor = (req) => req.appUser?.email || req.accessUser || process.env.DEV_USER || 'system';
 
 app.get('/', (req, res) => res.redirect('/agile-board'));
 
@@ -112,7 +118,7 @@ app.post('/api/hydrate', async (req, res) => {
 const FEEDBACK_PAGE_ID = 6;
 const FEEDBACK_REPLY_TO = process.env.FEEDBACK_REPLY_TO || 'pc7900@gmail.com';
 
-async function sendFeedbackReply(id, text) {
+async function sendFeedbackReply(id, text, sentBy) {
   text = text.trim();
   if (!Number.isInteger(id)) return { ok: false, error: 'No feedback record to reply to.' };
   if (!text) return { ok: false, error: 'Write a reply first.' };
@@ -139,8 +145,8 @@ async function sendFeedbackReply(id, text) {
   try {
     await callWorkflow('server-query', {
       query: `INSERT INTO support.feedback_replies (feedback_id, direction, to_email, subject, body, sent_by)
-              VALUES (:id, 'out', :to_email, :subject, :body, 'paul') RETURNING id`,
-      params: { id, to_email: fb.email, subject, body: text },
+              VALUES (:id, 'out', :to_email, :subject, :body, :sent_by) RETURNING id`,
+      params: { id, to_email: fb.email, subject, body: text, sent_by: sentBy },
       source: 'server'
     });
   } catch (err) {
@@ -167,7 +173,7 @@ app.post('/api/dml', async (req, res) => {
     // retired checkbox; it is still stripped so an older form cannot reach the generic save). Pressing Save with text
     // in the reply box sends it. The email goes out BEFORE the row is saved so a failed send leaves the form as it was.
     if (Number(page_id) === FEEDBACK_PAGE_ID && mode === 'UPDATE' && String(reply_body || '').trim() !== '') {
-      const sent = await sendFeedbackReply(Number(record_id), String(reply_body || ''));
+      const sent = await sendFeedbackReply(Number(record_id), String(reply_body || ''), actor(req));
       if (!sent.ok) return res.json({ success: false, error: sent.error });
       if (['new', 'reviewing'].includes(fields.status)) fields.status = 'replied';
     }
@@ -177,7 +183,7 @@ app.post('/api/dml', async (req, res) => {
       mode,
       data: fields,
       pk_val: record_id ? Number(record_id) : null,
-      user: 'paul'
+      user: actor(req)
     });
     res.json(result);
   } catch (err) {
@@ -233,11 +239,11 @@ app.post('/api/signoff', async (req, res) => {
                 (SELECT id FROM deployment.releases WHERE status = 'pending' ORDER BY id DESC LIMIT 1),
                 :step_id,
                 (SELECT id FROM deployment.environments WHERE name = 'prod'),
-                'paul',
+                :signed_by,
                 gap.result
               FROM gap
               RETURNING id, signed_at, result`,
-      params: { step_id },
+      params: { step_id, signed_by: actor(req) },
       source: 'server'
     });
     const row = Array.isArray(rows) ? rows[0] : rows;
@@ -260,7 +266,7 @@ app.post('/api/signoff/revoke', async (req, res) => {
   try {
     const rows = await callWorkflow('server-query', {
       query: `UPDATE deployment.step_signoffs
-              SET deleted_at = now(), deleted_by = 'paul'
+              SET deleted_at = now(), deleted_by = :deleted_by
               WHERE id = (
                 SELECT ss.id
                 FROM deployment.step_signoffs ss
@@ -271,7 +277,7 @@ app.post('/api/signoff/revoke', async (req, res) => {
                 LIMIT 1
               )
               RETURNING id`,
-      params: { step_id },
+      params: { step_id, deleted_by: actor(req) },
       source: 'server'
     });
     // server-query returns [{}] (one empty object), not [], when 0 rows match -
