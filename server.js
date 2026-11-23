@@ -62,8 +62,11 @@ app.get('/', (req, res) => res.redirect('/agile-board'));
 // hardcoded to studio.tf_template_router, not schema-aware, so this goes
 // straight at app_engine/support instead of routing through it.
 app.post('/api/hydrate', async (req, res) => {
-  const { template_name, page_id, page_title, ...contextParams } = req.body || {};
+  const { template_name, page_id, page_title, ...browserParams } = req.body || {};
   if (!template_name) return res.status(400).type('text').send('template_name required');
+  // Task 910: the user's stored context values fill in what the browser did not send; identity keys (userEmail, userID, firstName, lastName,
+  // role_id) only ever come from the store, so a hydrate SQL can trust them.
+  const contextParams = appContext ? await appContext.hydrateParams(req, browserParams) : browserParams;
 
   try {
     const tmplResult = await callWorkflow('server-query', {
@@ -338,7 +341,7 @@ async function startServer() {
 
   // The report modal (open_report) posts to /api/report. app-engine owns that handler (task 598); hydrate and dml above are
   // still this app's own copies, so only the report route is taken from the shared set.
-  app.post('/api/report', createApiRoutes(config).report);
+  app.post('/api/report', createApiRoutes(config, { context: appContext }).report);
 
   // 3. Derive the route list from the page registry (support.vw_pages). Each
   //    row -> a route the catch-all can serve. No per-page code.
