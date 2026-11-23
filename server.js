@@ -1,6 +1,6 @@
 import express from 'express';
 import Handlebars from 'handlebars';
-import { createRenderPage, loadAppConfig, wrapHtml, callWorkflow, createAccessGuard, createUserGuard, createApiRoutes } from 'app-engine';
+import { createRenderPage, loadAppConfig, wrapHtml, callWorkflow, createAccessGuard, createUserGuard, createApiRoutes, createAppContext } from 'app-engine';
 
 // No login/session flow - support has no login screen. Cloudflare Access is the front door (task 604) AND the app verifies Access's
 // signed token itself (task 602), because the droplet's address is reachable without going through Cloudflare. Refuses to start
@@ -38,6 +38,13 @@ if (guarded) {
   app.use(createAccessGuard({ teamDomain: ACCESS_TEAM_DOMAIN, audience: ACCESS_AUD, jwksUrl: ACCESS_JWKS_URL }));
   app.use(createUserGuard({ schema: 'support' }));   // task 909: only people in support.users get in (403 otherwise)
 }
+
+// Task 910: server context store (app_engine.context_store). A new Access sign-in resets the user's values and sets the identity values;
+// /api/actions serves setvals, clearvals and the app bar log-out (to apps.data.logoutUrl, /cdn-cgi/access/logout). Config loads in
+// startServer(), so these delegate to appContext once it exists; nothing reaches a page before then.
+let appContext = null;
+app.use((req, res, next) => (appContext ? appContext.sessionStart(req, res, next) : next()));
+app.post('/api/actions', (req, res) => (appContext ? appContext.actions(req, res) : res.status(503).json({ success: false, message: 'Starting up' })));
 
 // Who is acting, for created_by/sent_by/signed_by (task 911): the verified Access email. DEV_USER covers local development without Access.
 const actor = (req) => req.appUser?.email || req.accessUser || process.env.DEV_USER || 'system';
@@ -326,6 +333,7 @@ async function startServer() {
 
   // 2. Build the generic renderer bound to this app's config.
   ({ renderPage, setRoutes } = createRenderPage(config));
+  appContext = createAppContext(config);
 
   // The report modal (open_report) posts to /api/report. app-engine owns that handler (task 598); hydrate and dml above are
   // still this app's own copies, so only the report route is taken from the shared set.
