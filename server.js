@@ -97,7 +97,8 @@ app.post('/api/hydrate', async (req, res) => {
       dataArr = [{}];
     } else {
       // app_id is the board's default app (WF Projects, where new work files); App 58 is the pre-go-live record. id stays 58: it is a default row id, not an app choice.
-      const hydrateParams = { id: 58, app_id: 709, status: 'All', priority: 'All', timeframe: 'All', selected_run_id: '', selected_step_id: '', show_dry: 'live', ...contextParams };
+      // page_id (the page the component sits on) is passed through so a template can read its own page row, e.g. wf_appbar's title.
+      const hydrateParams = { id: 58, app_id: 709, status: 'All', priority: 'All', timeframe: 'All', selected_run_id: '', selected_step_id: '', show_dry: 'live', ...contextParams, page_id: page_id ?? null };
       // Any :param the hydrate SQL names that the browser did not send is bound to NULL (what the n8n hydrate-guide binder does),
       // so a page can introduce its own context key (release_id on the Release Plan page) without a code change here. An unbound
       // :name otherwise reaches Postgres as a syntax error. Casts (::text) are skipped by the lookbehind.
