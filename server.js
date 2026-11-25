@@ -70,11 +70,12 @@ app.post('/api/hydrate', async (req, res) => {
 
   try {
     const tmplResult = await callWorkflow('server-query', {
-      query: `SELECT hydrate FROM support.html_templates WHERE name = :template_name`,
+      query: `SELECT hydrate, platform FROM support.html_templates WHERE name = :template_name`,
       params: { template_name },
       source: 'server'
     });
     const hydrateSql = Array.isArray(tmplResult) ? tmplResult[0]?.hydrate : null;
+    const platform = Array.isArray(tmplResult) ? tmplResult[0]?.platform : null;
 
     const styledResult = await callWorkflow('server-query', {
       query: `SELECT app_engine.f_html_styled('support', :template_name) as html`,
@@ -93,10 +94,13 @@ app.post('/api/hydrate', async (req, res) => {
     }
 
     let dataArr;
-    if (contextParams.mode === 'INSERT') {
+    if (contextParams.mode === 'INSERT' && platform === 'form') {
       // New record: render the form against one blank row rather than
       // running the hydrate SQL, which would otherwise fall back to the
       // default id (58) and populate the "new" form with an existing row.
+      // Forms only: mode stays 'INSERT' in the browser's contextStore after
+      // Add New, so the grid refresh that follows a Save also arrives with it
+      // and must still run its query (it came back as one blank row).
       dataArr = [{}];
     } else {
       // app_id is the board's default app (WF Projects, where new work files); App 58 is the pre-go-live record. id stays 58: it is a default row id, not an app choice.
